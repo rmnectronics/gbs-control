@@ -22,6 +22,7 @@ extern "C" {
 #include <user_interface.h>
 }
 #define vsyncInPin D7
+#define debugInPin D5
 #define LEDON  digitalWrite(LED_BUILTIN, LOW) // active low
 #define LEDOFF digitalWrite(LED_BUILTIN, HIGH)
 
@@ -35,11 +36,13 @@ extern "C" {
 #define LEDON  digitalWrite(LED_BUILTIN, HIGH)
 #define LEDOFF digitalWrite(LED_BUILTIN, LOW)
 #define vsyncInPin 27
+#define debugInPin 28 // ??
 
 #else // Arduino
 #define LEDON  digitalWrite(LED_BUILTIN, HIGH)
 #define LEDOFF digitalWrite(LED_BUILTIN, LOW)
 #define vsyncInPin 10
+#define vsyncInPin 11 // ??
 #endif
 
 #if defined(ESP8266) || defined(ESP32)
@@ -64,10 +67,12 @@ struct runTimeOptions {
   boolean syncLockEnabled;
   boolean syncLockFound;
   boolean VSYNCconnected;
+  boolean DEBUGINconnected;
   boolean IFdown; // push button support example using an interrupt
   boolean printInfos;
   boolean sourceDisconnected;
   boolean webServerEnabled;
+  boolean webServerStarted;
   boolean allowUpdatesOTA;
 } rtos;
 struct runTimeOptions *rto = &rtos;
@@ -377,7 +382,7 @@ void fuzzySPWrite() {
 
 void setParametersSP() {
   writeOneByte(0xF0, 5);
-  writeOneByte(0x20, 0x02); // was 0xd2 // keep jitter sync off, 0x02 is right (auto correct sog polarity, sog source = ADC)
+  writeOneByte(0x20, 0x12); // was 0xd2 // keep jitter sync on! (snes, check debug vsync)(auto correct sog polarity, sog source = ADC)
   // H active detect control
   writeOneByte(0x21, 0x1b); // SP_SYNC_TGL_THD    H Sync toggle times threshold  0x20
   writeOneByte(0x22, 0x0f); // SP_L_DLT_REG       Sync pulse width different threshold (little than this as equal).
@@ -1397,39 +1402,64 @@ void aquireSyncLock() {
     if (pulseIn(vsyncInPin, HIGH, 100000) != 0) {
       if  (pulseIn(vsyncInPin, LOW, 100000) != 0) {
         rto->VSYNCconnected = true;
+        Serial.println(F("VSYNC wire connected :)"));
       }
     }
     else {
-      Serial.println(F("VSYNC not connected"));
+      Serial.println(F("VSYNC wire not connected"));
       rto->VSYNCconnected = false;
       rto->syncLockEnabled = false;
       return;
     }
   }
 
-  writeOneByte(0xF0, 0);
-  readFromRegister(0x4f, 1, &readout);
-  writeOneByte(0x4f, readout | (1 << 7));
-  delay(2);
+  if (rto->DEBUGINconnected == false) {
+    if (pulseIn(debugInPin, HIGH, 100000) != 0) {
+      if  (pulseIn(debugInPin, LOW, 100000) != 0) {
+        rto->DEBUGINconnected = true;
+        Serial.println(F("Debug wire connected :)"));
+      }
+    }
+    else {
+      Serial.println(F("Debug wire not connected"));
+    }
+  }
+
+  if (rto->DEBUGINconnected == false) {  // then use old vsync only method
+    writeOneByte(0xF0, 0);
+    readFromRegister(0x4f, 1, &readout);
+    writeOneByte(0x4f, readout | (1 << 7));
+    delay(2);
+  }
 
   long highTest1, highTest2;
   long lowTest1, lowTest2;
 
   // input field time
   noInterrupts();
-  highTest1 = pulseIn(vsyncInPin, HIGH, 90000);
-  highTest2 = pulseIn(vsyncInPin, HIGH, 90000);
-  lowTest1 = pulseIn(vsyncInPin, LOW, 90000);
-  lowTest2 = pulseIn(vsyncInPin, LOW, 90000);
+  if (rto->DEBUGINconnected == true) { // then use new method
+    highTest1 = pulseIn(debugInPin, HIGH, 90000);
+    highTest2 = pulseIn(debugInPin, HIGH, 90000);
+    lowTest1 = pulseIn(debugInPin, LOW, 90000);
+    lowTest2 = pulseIn(debugInPin, LOW, 90000);
+  }
+  else { // old method
+    highTest1 = pulseIn(vsyncInPin, HIGH, 90000);
+    highTest2 = pulseIn(vsyncInPin, HIGH, 90000);
+    lowTest1 = pulseIn(vsyncInPin, LOW, 90000);
+    lowTest2 = pulseIn(vsyncInPin, LOW, 90000);
+  }
   interrupts();
 
   inputLength = ((highTest1 + highTest2) / 2);
   inputLength += ((lowTest1 + lowTest2) / 2);
 
-  writeOneByte(0xF0, 0);
-  readFromRegister(0x4f, 1, &readout);
-  writeOneByte(0x4f, readout & ~(1 << 7));
-  delay(2);
+  if (rto->DEBUGINconnected == false) { // old method
+    writeOneByte(0xF0, 0);
+    readFromRegister(0x4f, 1, &readout);
+    writeOneByte(0x4f, readout & ~(1 << 7));
+    delay(2);
+  }
 
   // current output field time
   noInterrupts();
@@ -1504,11 +1534,13 @@ void aquireSyncLock() {
 
   // changing htotal shifts the canvas with in the frame. Correct this now.
   int toShiftPixels = backupHTotal - bestHTotal;
-  if (toShiftPixels >= 0 && toShiftPixels < 80) {
+  if (toShiftPixels > 0 && toShiftPixels < 80) {
+    toShiftPixels = (backupHTotal / toShiftPixels) / 60; // seems to work okay
     Serial.print("shifting "); Serial.print(toShiftPixels); Serial.println(" pixels left");
     shiftHorizontal(toShiftPixels, true); // true = left
   }
   else if (toShiftPixels < 0 && toShiftPixels > -80) {
+    toShiftPixels = (backupHTotal / toShiftPixels) / 60; // seems to work okay
     Serial.print("shifting "); Serial.print(-toShiftPixels); Serial.println(" pixels right");
     shiftHorizontal(-toShiftPixels, false); // false = right
   }
@@ -1561,6 +1593,15 @@ void aquireSyncLock() {
 
   rto->syncLockFound = true;
 }
+
+void enableDebugPort() {
+  writeOneByte(0xf0, 0);
+  writeOneByte(0x48, 0xeb); //3f
+  writeOneByte(0x4D, 0x2a); //2a
+  writeOneByte(0xf0, 0x05);
+  writeOneByte(0x63, 0x0f);
+}
+
 void doPostPresetLoadSteps() {
   if (rto->inputIsYpBpR == true) {
     Serial.print("(YUV)");
@@ -1583,10 +1624,10 @@ void doPostPresetLoadSteps() {
   }
   //setParametersIF(); // it's sufficient to do this in syncwatcher
   setClampPosition();
+  enableDebugPort();
   resetPLL();
-  enableVDS(); delay(10); // VDS has to be on before setPhaseADC() or setPhaseSP() !
-  resetPLLAD();
-  setPhaseSP(); delay (10); setPhaseADC();
+  enableVDS(); delay(10);
+  resetPLLAD(); delay(10);
   resetSyncLock();
   rto->modeDetectInReset = false;
   LEDOFF; // in case LED was on
@@ -1618,7 +1659,7 @@ void applyPresets(byte result) {
   else if (result == 1) {
     Serial.println(F("NTSC timing "));
     if (uopt->presetPreference == 0) {
-      writeProgramArrayNew(ntsc_240p);
+      writeProgramArrayNew(vclktest);
     }
     else if (uopt->presetPreference == 1) {
       writeProgramArrayNew(ntsc_feedbackclock);
@@ -1637,7 +1678,7 @@ void applyPresets(byte result) {
     Serial.println(F("HDTV timing "));
     // ntsc base
     if (uopt->presetPreference == 0) {
-      writeProgramArrayNew(ntsc_240p);
+      writeProgramArrayNew(vclktest);
     }
     else if (uopt->presetPreference == 1) {
       writeProgramArrayNew(ntsc_feedbackclock);
@@ -1769,11 +1810,12 @@ void advancePhase() {
 }
 
 void setPhaseSP() {
-
   uint8_t readout = 0;
-  uint8_t complete = 0;
+  uint8_t debug_backup = 0;
 
   writeOneByte(0xF0, 5);
+  readFromRegister(0x63, 1, &debug_backup);
+  writeOneByte(0x63, 0x3d); // prep test bus, output clock (?)
   readFromRegister(0x19, 1, &readout);
   readout &= ~(1 << 7); // latch off
   writeOneByte(0x19, readout);
@@ -1781,30 +1823,27 @@ void setPhaseSP() {
   readout = rto->phaseSP << 1;
   readout |= (1 << 0);
   writeOneByte(0x19, readout); // write this first
-  // new phase is now ready. it will go in effect when the latch bit gets toggled
-  readFromRegister(0x19, 1, &readout);
-  readout |= (1 << 7);
+  readFromRegister(0x19, 1, &readout); // read out again
+  readout |= (1 << 7);  // latch is now primed. new phase will go in effect when readout is written
 
-  writeOneByte(0xF0, 0);
-  uint16_t timeout = 5000;
-  do {
-    readFromRegister(0x10, 1, &complete);
-    timeout--;
-  } while (((complete & 0x10) == 0) && timeout > 0);
-
-  writeOneByte(0xF0, 5);
-  writeOneByte(0x19, readout);
-  if (timeout == 0) {
-    Serial.println("timeout in setPhaseSP");
+  if (pulseIn(debugInPin, HIGH, 100000) != 0) {
+    if  (pulseIn(debugInPin, LOW, 100000) != 0) {
+      while (digitalRead(debugInPin) == 1);
+      while (digitalRead(debugInPin) == 0);
+    }
   }
+
+  writeOneByte(0x19, readout);
+  writeOneByte(0x63, debug_backup); // restore
 }
 
 void setPhaseADC() {
-
   uint8_t readout = 0;
-  uint8_t complete = 0;
+  uint8_t debug_backup = 0;
 
   writeOneByte(0xF0, 5);
+  readFromRegister(0x63, 1, &debug_backup);
+  writeOneByte(0x63, 0x3d); // prep test bus, output clock (?)
   readFromRegister(0x18, 1, &readout);
   readout &= ~(1 << 7); // latch off
   writeOneByte(0x18, readout);
@@ -1812,22 +1851,18 @@ void setPhaseADC() {
   readout = rto->phaseADC << 1;
   readout |= (1 << 0);
   writeOneByte(0x18, readout); // write this first
-  // new phase is now ready. it will go in effect when the latch bit gets toggled
-  readFromRegister(0x18, 1, &readout);
-  readout |= (1 << 7);
+  readFromRegister(0x18, 1, &readout); // read out again
+  readout |= (1 << 7); // latch is now primed. new phase will go in effect when readout is written
 
-  writeOneByte(0xF0, 0);
-  uint16_t timeout = 5000;
-  do {
-    readFromRegister(0x10, 1, &complete);
-    timeout--;
-  } while (((complete & 0x10) == 0) && timeout > 0);
-
-  writeOneByte(0xF0, 5);
-  writeOneByte(0x18, readout);
-  if (timeout == 0) {
-    Serial.println("timeout in setPhaseADC");
+  if (pulseIn(debugInPin, HIGH, 100000) != 0) {
+    if  (pulseIn(debugInPin, LOW, 100000) != 0) {
+      while (digitalRead(debugInPin) == 1);
+      while (digitalRead(debugInPin) == 0);
+    }
   }
+
+  writeOneByte(0x18, readout);
+  writeOneByte(0x63, debug_backup); // restore
 }
 
 void setClampPosition() {
@@ -1836,18 +1871,18 @@ void setClampPosition() {
   }
   else {
     uint8_t register_high, register_low;
-    uint16_t hpw, htotal, clampPositionStart, clampPositionStop;
+    uint16_t htotal, clampPositionStart, clampPositionStop;
 
     writeOneByte(0xF0, 0);
-    readFromRegister(0x1a, 1, &register_high); readFromRegister(0x19, 1, &register_low);
-    hpw = (((uint16_t(register_high) & 0x000f)) << 8) | (uint16_t)register_low;
-    readFromRegister(0x18, 1, &register_high); readFromRegister(0x17, 1, &register_low);
-    htotal = (((uint16_t(register_high) & 0x000f)) << 8) | (uint16_t)register_low;
+    readFromRegister(0x07, 1, &register_high); readFromRegister(0x06, 1, &register_low);
+    htotal = ((((uint16_t(register_high) & 0x0001)) << 8) | (uint16_t)register_low) * 4;
 
-    clampPositionStart = ((htotal - hpw) + 20) & 0xfff8;
-    clampPositionStop = (htotal - 20) & 0xfff8;
+    clampPositionStart = (htotal - 80) & 0xfff8;
+    clampPositionStop = (htotal - 50) & 0xfff8;
+
     Serial.print(" clampPositionStart: "); Serial.println(clampPositionStart);
     Serial.print(" clampPositionStop: "); Serial.println(clampPositionStop);
+
     register_high = clampPositionStart >> 8;
     register_low = (uint8_t)clampPositionStart;
     writeOneByte(0xF0, 5);
@@ -1928,7 +1963,7 @@ void setup() {
   rto->syncLockEnabled = true;  // automatically find the best horizontal total pixel value for a given input timing
   rto->syncWatcher = true;  // continously checks the current sync status. issues resets if necessary
   rto->phaseADC = 16; // 0 to 31
-  rto->phaseSP = 10; // 0 to 31
+  rto->phaseSP = 0; // 0 to 31
   rto->samplingStart = 3; // holds S1_26
 
   // the following is just run time variables. don't change!
@@ -1938,14 +1973,20 @@ void setup() {
   rto->deinterlacerWasTurnedOff = false;
   rto->modeDetectInReset = false;
   rto->syncLockFound = false;
+  rto->webServerStarted = false;
   rto->VSYNCconnected = false;
+  rto->DEBUGINconnected = false;
   rto->IFdown = false;
   rto->printInfos = false;
   rto->sourceDisconnected = false;
 
+  globalCommand = 0; // web server uses this to issue commands
+
   pinMode(vsyncInPin, INPUT);
+  pinMode(debugInPin, INPUT);
   pinMode(LED_BUILTIN, OUTPUT);
   LEDON; // enable the LED, lets users know the board is starting up
+  delay(3000); // give the entire system some time to start up.
 
   // example for using the gbs8200 onboard buttons in an interrupt routine
   //pinMode(2, INPUT); // button for IFdown
@@ -1970,8 +2011,6 @@ void setup() {
     f.close();
   }
 #endif
-
-  delay(1000); // give the 5725 some time to start up. this adds to the Arduino bootloader delay.
 
   Wire.begin();
   // The i2c wire library sets pullup resistors on by default. Disable this so that 5V MCUs aren't trying to drive the 3.3V bus.
@@ -2021,26 +2060,12 @@ void setup() {
     applyPresets(result);
     delay(1000); // at least 750ms required to become stable
   }
-
-  // prepare for synclock
-  result = getVideoMode();
-  timeout = 255;
-  while (result == 0 && --timeout > 0) {
-    if ((timeout % 5) == 0) Serial.print(".");
-    result = getVideoMode();
-    delay(1);
-  }
-  // sync should be stable now
-  if ((result != 0) && rto->syncLockEnabled == true && rto->syncLockFound == false && rto->videoStandardInput != 0) {
-    aquireSyncLock();
-  }
 #endif
 
-  globalCommand = 0; // web server uses this to issue commands
 #if defined(ESP8266)
   if (rto->webServerEnabled) {
-    start_webserver();
-    WiFi.setOutputPower(12.0f); // float: min 0.0f, max 20.5f
+    //start_webserver(); // delay this (blocking) call to sometime later
+    //WiFi.setOutputPower(12.0f); // float: min 0.0f, max 20.5f
   }
   else {
     WiFi.disconnect();
@@ -2050,9 +2075,9 @@ void setup() {
   }
 #elif defined(ESP32)
   if (rto->webServerEnabled) {
-    start_webserver();
-    delay(50);
-    esp32_power();
+    //start_webserver();  // delay this (blocking) call to sometime later
+    //delay(50);
+    //esp32_power();
   }
   else {
     WiFi.disconnect();
@@ -2076,9 +2101,22 @@ void loop() {
   static uint16_t signalInputChangeCounter = 0;
   static unsigned long lastTimeSyncWatcher = millis();
   static unsigned long lastTimeMDWatchdog = millis();
+  static unsigned long webServerStartDelay = millis();
 
 #if defined(ESP8266) || defined(ESP32)
-  if (rto->webServerEnabled) {
+  if (rto->webServerEnabled && !rto->webServerStarted && ((millis() - webServerStartDelay) > 5000) ) {
+#if defined(ESP8266)
+    start_webserver(); // delay this (blocking) call to sometime in loop()
+    WiFi.setOutputPower(12.0f); // float: min 0.0f, max 20.5f
+#elif defined(ESP32)
+    start_webserver();  // delay this (blocking) call to sometime in loop()
+    delay(50);
+    esp32_power();
+#endif
+    rto->webServerStarted = true;
+  }
+
+  if (rto->webServerEnabled && rto->webServerStarted) {
     handleWebClient();
     // if there's a control command from the server, globalCommand will now hold it.
     // process it in the parser, then reset to 0 at the end of the sketch.
@@ -2131,29 +2169,13 @@ void loop() {
         Serial.println(F("resetDigital()"));
         break;
       case 'y':
-        {
-          // EEPROM is wildly different on each chip
-
-          //          uint16_t address = 0;
-          //#if defined(ESP8266)
-          //          EEPROM.begin(1024); //ESP8266
-          //#endif
-          //          while (1) {
-          //            Serial.println(EEPROM.read(address), HEX);
-          //            address++;
-          //            if (address == EEPROM.length()) {
-          //              break;
-          //            }
-          //          }
-          //#if defined(ESP8266)
-          //          EEPROM.end(); //ESP8266
-          //#endif
-          Serial.println(F("----"));
-          //h:429 v:523 PLL:2 status:0 mode:1 ADC:7F hpw:158 htotal:1710 vtotal:259  Mega Drive NTSC
-        }
+        writeProgramArrayNew(vclktest);
+        rto->videoStandardInput = 1;
+        doPostPresetLoadSteps();
         break;
       case 'p':
-        //
+        fuzzySPWrite();
+        SyncProcessorOffOn();
         break;
       case 'k':
         {
@@ -2195,8 +2217,9 @@ void loop() {
         resetPLL(); resetPLLAD();
         break;
       case 'v':
-        fuzzySPWrite();
-        SyncProcessorOffOn();
+        rto->phaseSP += 4; rto->phaseSP &= 0x1f;
+        Serial.print("SP: "); Serial.println(rto->phaseSP);
+        setPhaseSP();
         break;
       case 'b':
         advancePhase(); resetPLLAD();
@@ -2595,7 +2618,7 @@ void loop() {
       boolean isValid = getSyncProcessorSignalValid();
       if (result > 0 && isValid) { // ensures this isn't an MD glitch
         applyPresets(result);
-        delay(600);
+        //delay(600);
         noSyncCounter = 0;
       }
       else if (result > 0 && !isValid) Serial.println(F("MD Glitch!"));
@@ -2605,7 +2628,7 @@ void loop() {
     if ((millis() - lastTimeMDWatchdog) > 3000) {
       if ( (rto->videoStandardInput > 0) && !getSyncProcessorSignalValid() && (rto->modeDetectInReset == false) ) {
         delay(40);
-        if (!getSyncProcessorSignalValid()) { // check a second time; avoids glitches
+        if (!getSyncProcessorSignalValid() && !getSyncProcessorSignalValid()) { // check some more times; avoids glitches
           Serial.println("MD stuck");
           resetModeDetect(); resetModeDetect();
           delay(200);
@@ -2694,6 +2717,8 @@ void loop() {
   // only run this when sync is stable!
   if (rto->syncLockEnabled == true && rto->syncLockFound == false && getSyncStable() && rto->videoStandardInput != 0) {
     aquireSyncLock();
+    delay(50);
+    setPhaseSP(); delay (10); setPhaseADC();
   }
 
   if (rto->sourceDisconnected == true) { // keep looking for new input
