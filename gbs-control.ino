@@ -15,6 +15,14 @@
 #include <DNSServer.h>
 #include <ESP8266WebServer.h>
 #include <WiFiManager.h> // install WiFiManager library by tzapu first!
+//################################ IR STUFF
+#include <IRremoteESP8266.h>
+#include <IRrecv.h>
+#include <IRutils.h>
+uint16_t RECV_PIN = D6; 
+IRrecv irrecv(RECV_PIN);
+decode_results results;
+//################################
 struct tcp_pcb;
 extern struct tcp_pcb* tcp_tw_pcbs;
 extern "C" void tcp_abort (struct tcp_pcb* pcb);
@@ -1951,7 +1959,8 @@ void setup() {
 #if defined(ESP32)
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); //disable brownout detector
 #endif
-  Serial.begin(250000); // up from 57600
+  Serial.begin(230400); // up from 57600
+  irrecv.enableIRIn();  // Start the receiver
   Serial.setTimeout(10);
   Serial.println(F("starting"));
 
@@ -2087,6 +2096,39 @@ void setup() {
   Serial.print(F("\nMCU: ")); Serial.println(F_CPU);
   LEDOFF; // startup done, disable the LED
 }
+void CheckIR()
+{
+   if (irrecv.decode(&results)) 
+   {   
+      switch(results.value)
+      {
+         case 0xFFB24D: globalCommand = 'q'; break;// PWR resetDigital();
+         // case 0xFF2AD5: globalCommand = ''; break;// SOURCE
+         // case 0xFF6897: globalCommand = ''; break;// MUTE
+         case 0xFF32CD: globalCommand = 'z'; break;// REC scaleHorizontalLarger();
+         case 0xFFA05F: globalCommand = '*'; break;// CH+ / UP "shift vert. +"
+         case 0xFF30CF: globalCommand = '4'; break;// TIME SHIFT scaleVertical(1, true);
+         case 0xFF50AF: globalCommand = '-'; break;// VOL- / LEFT "shift hor. -"
+         // case 0xFF02FD: globalCommand = ''; break;// FULL SCREEN
+         case 0xFF7887: globalCommand = '+'; break;// VOL+ / RIGHT "shift hor. +"
+         case 0xFF48B7: globalCommand = 'h'; break;// 0 scaleHorizontalSmaller();
+         case 0xFF40BF: globalCommand = '/'; break;// CH- / DOWN "shift vert. -"
+         case 0xFF38C7: globalCommand = '5'; break;// RECALL scaleVertical(1, false);
+         case 0xFF906F: globalCommand = 'r'; break;// 1 >PAL Normal
+         case 0xFFB847: globalCommand = '2'; break;// 2 PAL Feedback Clock
+         // case 0xFFF807: globalCommand = ''; break;// 3
+         case 0xFFB04F: globalCommand = 'e'; break;// 4 NTSC Normal
+         case 0xFF9867: globalCommand = '9'; break;// 5 NTSC Feedback Clock
+         // case 0xFFD827: globalCommand = ''; break;// 6
+         // case 0xFF8877: globalCommand = ''; break;// 7
+         // case 0xFFA857: globalCommand = ''; break;// 8
+         // case 0xFFE817: globalCommand = ''; break;// 9
+         default:
+            break;
+      }
+      irrecv.resume();  // Receive the next value
+   }
+}
 
 void loop() {
   // reminder: static variables are initialized once, not every loop
@@ -2126,6 +2168,8 @@ void loop() {
     ArduinoOTA.handle();
   }
 #endif
+
+CheckIR();
 
   if (Serial.available() || globalCommand != 0) {
     switch (globalCommand == 0 ? Serial.read() : globalCommand) {
